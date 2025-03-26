@@ -11,15 +11,15 @@ def speculative_sampling(
     max_new_tokens: int,
     gamma: int = 4,
 ) -> torch.Tensor:
-    """
+    '''
     :param prefix: input token IDs to start generation from. Shape is (batch, prefix_len)
     :param verifier: the larger, more accurate model used to verify the drafted tokens
     :param drafter: the smaller, faster model used to draft candidate token
-    :param max_new_tokens:
+    :param max_new_tokens: maximum number of tokens to generate
     :param gamma: the number of tokens the drafter guesses
 
     :return: generated tokens including the prefix. Shape is (batch, seq_len)
-    """
+    '''
 
     sequence = prefix
     assert sequence.shape[0] == 1, 'Only batch_size == 1 supported'
@@ -37,14 +37,10 @@ def speculative_sampling(
         draft_logits_history = []
 
         for _ in range(spec_steps):
-            draft_logits = drafter(speculated_sequence)
-            # draft_logits has shape [batch_size, sequence_length, vocabulary_size].
-            # To get the next token we need to select only the last position in
-            # the sequence
+            draft_logits = drafter(speculated_sequence) # [batch_size, sequence_length, vocabulary_size]
             last = draft_logits[:, -1, :]
             draft_logits_history.append(last)
             
-            # greedy decoding for now :(
             next_tokens = torch.argmax(last, dim=-1, keepdim=True)
             speculated_sequence = torch.cat([speculated_sequence, next_tokens], dim=1)
         
@@ -104,8 +100,8 @@ def speculative_sampling(
             # clamping here to avoid division by zero
             sum_adjusted = torch.clamp(adjusted_probs.sum(dim=-1, keepdim=True), min=1e-12)
             # here we're dividing adjusted_probs by sum to rescale the values, to ensure they form
-            # a proper probability distribution. this is required since we're subtracting the draft's
-            # probabilities from the verifier's and zero out any negative values, resulting in a
+            # a proper probability distribution. this is required since we subtracted the draft's
+            # probabilities from the verifier's and zeroed out any negative values, resulting in a
             # distribution that no longer sums to 1
             adjusted_probs /= sum_adjusted
             next_token = torch.argmax(adjusted_probs, dim=-1, keepdim=True)

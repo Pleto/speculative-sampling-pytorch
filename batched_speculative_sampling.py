@@ -5,8 +5,49 @@ from common import Benchmark, ModelFn, model_fn, set_seed
 
 
 def extend_sequence(sequence, attention_mask, next_tokens, pad_token_id):
-    """
-    """
+    '''
+    Extends token sequences by inserting new tokens at the first 0 position
+    in the attention mask
+
+    :param sequence: the token sequence to extend. Shape is (batch, seq_len)
+    :param attention_mask: the attention mask for the sequence. Shape is (batch, seq_len)
+    :param next_tokens: the tokens to insert. Shape is (batch, 1)
+    :param pad_token_id: the ID of the padding token
+
+    :return: the extended sequence. Shape is (batch, seq_len + 1)
+
+    Example:
+    ```
+    sequence = torch.IntTensor([
+        [ 7608,   1,  1],
+        [  100, 437,  1],
+        [  100, 437, 45],
+        [12375,  16,  5],
+    ])
+
+    attention_mask = torch.IntTensor([
+        [1, 0, 0],
+        [1, 1, 0],
+        [1, 1, 1],
+        [1, 1, 1],
+    ])
+
+    next_tokens = torch.IntTensor([
+        [754],
+        [754],
+        [ 16],
+        [121],
+    ])
+
+    output = extend_sequence(sequence, attention_mask, next_tokens, 1)
+    # output should be:
+    # tensor([[  7608, 754,   1,   1],
+    #         [   100, 437, 754,   1],
+    #         [   100, 437,  45,  16],
+    #         [ 12375,  16,   5, 121]])
+
+    ```
+    '''
     batch_size, _ = attention_mask.shape
     insert_positions = attention_mask.sum(dim=1, dtype=torch.int, keepdim=True)
     
@@ -20,24 +61,93 @@ def extend_sequence(sequence, attention_mask, next_tokens, pad_token_id):
 
 
 def extend_attention_mask(attention_mask):
-    """
-    """
+    '''
+    Extends attention masks by adding a new column of 1s at the end of each
+    sequence
+
+    :param attention_mask: the attention mask to extend. Shape is (batch, seq_len)
+
+    :return: the extended attention mask. Shape is (batch, seq_len + 1)
+
+    Example:
+    ```
+    attention_mask = torch.IntTensor([
+        [1, 0, 0],
+        [1, 1, 0],
+        [1, 1, 1],
+        [1, 1, 1],
+    ])
+
+    output = extend_attention_mask(attention_mask)
+    # output should be:
+    # tensor([[1, 1, 0, 0],
+    #         [1, 1, 1, 0],
+    #         [1, 1, 1, 1],
+    #         [1, 1, 1, 1]])
+    ```
+    '''
     batch_size, _ = attention_mask.shape
     next_tokens = torch.ones(batch_size, dtype=attention_mask.dtype).unsqueeze(-1)
     return extend_sequence(attention_mask, attention_mask, next_tokens, 0)
 
 
-def remove_last_zero_columns(tensor):
-    """
-    """
-    non_zero_cols = torch.sum(tensor.abs(), dim=0) != 0
-    last_non_zero = torch.where(non_zero_cols)[0][-1]
-    return tensor[:, :last_non_zero+1]
-
-
 def accept(sequence, mask, active_mask, accepted, pad_token_id):
-    """
-    """
+    '''
+    Merges accepted tokens into active sequences in a batch, extending the sequences and
+    their corresponding masks
+
+    :param sequence: token sequences with shape [batch_size, seq_length]
+    :param mask: integer mask indicating valid tokens (1) vs padding (0) in the sequence
+    :param active_mask: boolean mask of shape [batch_size] indicating which sequences in
+                        the batch should receive new tokens.
+    :param accepted: tensor of tokens to append to active sequences, with shape
+                     [num_active, max_accepted_length], where
+                     num_active == active_mask.sum()
+    :param pad_token_id: token ID used for padding
+
+    :return new_seq: updated sequences with accepted tokens appended to active sequences
+    :return new_mask: updated mask reflecting the new valid token positions.
+
+    Example:
+    ```
+    sequence = torch.IntTensor([
+        [16, 1, 1],
+        [50118, 132, 15],
+        [50118, 1, 1],
+        [1, 1, 1]
+    ])
+
+    mask = torch.IntTensor([
+        [1, 0, 0],
+        [1, 1, 1],
+        [1, 0, 0],
+        [0, 0, 0]
+    ])
+
+    active_mask = torch.BoolTensor([False, True, False, True])
+
+    # all 0 columns at the end will be trimmed
+    accepted = torch.IntTensor([
+        [14, 0, 0, 0],
+        [15, 16, 0, 0],
+    ])
+
+    new_seq, new_mask = accept(sequence, mask, active_mask, accepted, 1)
+
+    # new_seq should be:
+    # tensor([[16, 1, 1, 1],
+    #         [50118, 132, 15, 14],
+    #         [50118, 1, 1, 1],
+    #         [15, 16, 1, 1]])
+    #
+    # new mask should be:
+    # tensor([[1, 0, 0, 0],
+    #         [1, 1, 1, 1],
+    #         [1, 0, 0, 0],
+    #         [1, 1, 0, 0]
+    # ])
+    ```
+    '''
     batch_size = sequence.size(0)
     orig_valid = mask.sum(dim=1).tolist()
     
@@ -82,17 +192,17 @@ def batched_speculative_sampling(
     max_new_tokens: int,
     gamma: int = 4,
 ) -> torch.Tensor:
-    """
+    '''
     :param prefix: input token IDs to start generation from. Shape is (batch, prefix_len)
-    :param attention_mask:
-    :param tokenizer: 
+    :param attention_mask: binary tensor indicating which tokens to attend to (1=visible, 0=masked).
+                           Shape is (batch, prefix_len)
     :param verifier: the larger, more accurate model used to verify the drafted tokens
     :param drafter: the smaller, faster model used to draft candidate token
-    :param max_new_tokens:
+    :param max_new_tokens: maximum number of tokens to generate
     :param gamma: the number of tokens the drafter guesses
 
-    :return: generated tokens including the prefix. Shape is (batch, seq_len)
-    """
+    :return: generated tokens including the prefix. Shape is (batch, prefix_len + max_new_tokens)
+    '''
     pad_token_id = 1
 
     sequence = prefix
@@ -100,9 +210,13 @@ def batched_speculative_sampling(
     
     batch_size, _ = sequence.shape
 
+    # indices to keep track of the original order of the sequences
     indices = torch.arange(batch_size, dtype=torch.int)
 
+    # boolean tensor to keep track for what sequences I'm still generating tokens
     active_mask = torch.ones(batch_size, dtype=torch.bool)
+
+    # keep track of how many tokens I've generated for each sequence
     num_generated_tokens = torch.zeros(batch_size, dtype=torch.int)
 
     while active_mask.any():
@@ -113,11 +227,12 @@ def batched_speculative_sampling(
         active_indices = torch.arange(active_size)
 
         spec_steps = min(max_new_tokens - num_generated_tokens.min().item(), gamma)
-        
-        draft_logits_history = []
         if spec_steps <= 0:
             break
 
+        draft_logits_history = []
+
+        # pos keeps the position of the last generated token in each sequence
         pos = mask.sum(dim=1, keepdim=True).squeeze()
         if pos.numel() > 1:
             pos = pos[active_mask]
@@ -141,19 +256,22 @@ def batched_speculative_sampling(
         verify_logits = verifier(spec_sequence, spec_mask)
         verify_probs = torch.softmax(verify_logits, dim=-1)
 
+        # the indices of the active sequences. these DON'T correspond to the indices of the
+        # whole batch, but to the active sequences only
         active_indices = torch.arange(active_size)
+        # the tokens that the verifier has accepted
         accepted_tokens = torch.zeros(active_size, gamma + 1, dtype=sequence.dtype)
 
-        still_speculating = active_indices.detach().clone()
-
+        # here pos is the position of each generated token per sequence
         pos = mask.sum(dim=1, keepdim=True).squeeze()
         if pos.numel() > 1:
             pos = pos[active_mask]
-            
+
+        # for what sequences we have accepted the draft token
         accept_decisions = torch.ones(active_size, dtype=torch.bool)
 
         for i in range(spec_steps):
-            if torch.all(still_speculating == -1).item():
+            if not accept_decisions.any():
                 break
 
             draft_tokens = spec_sequence[active_indices, pos]
@@ -168,8 +286,7 @@ def batched_speculative_sampling(
             random_values = torch.rand(active_size)
             accept_decisions = accept_decisions & (random_values < acceptance_ratio)
 
-            accepted_tokens[still_speculating[accept_decisions], i] = draft_tokens[accept_decisions]
-            still_speculating[~accept_decisions] = -1
+            accepted_tokens[active_indices[accept_decisions], i] = draft_tokens[accept_decisions]
 
             pos += 1
 
@@ -179,6 +296,7 @@ def batched_speculative_sampling(
         if need_resampling.any():
             resampling_active_indices = active_indices[need_resampling]
 
+            # here pos will indicate the position of the token that needs resampling
             pos = mask.sum(dim=1, keepdim=True).squeeze()
             if pos.numel() > 1:
                 pos = pos[resampling_active_indices]
