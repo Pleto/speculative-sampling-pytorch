@@ -1,30 +1,7 @@
-import time
-from typing import Callable
 from transformers import AutoTokenizer, AutoModelForCausalLM, PreTrainedTokenizer, PreTrainedModel
 import torch
-import numpy as np
-import random
-import os
 
-type ModelFn = Callable[[torch.Tensor], torch.Tensor]
-
-def model_fn(model: PreTrainedModel) -> ModelFn:
-    def forward(input: torch.Tensor):
-        output = model(input, use_cache=False)
-        return output.logits
-    
-    return forward
-
-def set_seed(seed):
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    torch.use_deterministic_algorithms(True)
+from common import Benchmark, ModelFn, model_fn, set_seed
 
 @torch.no_grad()
 def speculative_sampling(
@@ -36,10 +13,9 @@ def speculative_sampling(
 ) -> torch.Tensor:
     """
     :param prefix: input token IDs to start generation from. Shape is (batch, prefix_len)
-    :param tokenizer: 
     :param verifier: the larger, more accurate model used to verify the drafted tokens
-    :param max_new_tokens:
     :param drafter: the smaller, faster model used to draft candidate token
+    :param max_new_tokens:
     :param gamma: the number of tokens the drafter guesses
 
     :return: generated tokens including the prefix. Shape is (batch, seq_len)
@@ -49,10 +25,6 @@ def speculative_sampling(
     assert sequence.shape[0] == 1, 'Only batch_size == 1 supported'
 
     target_length = sequence.size(1) + max_new_tokens
-
-    drafted_count = 0
-    resample_count = 0
-    accepted_count = 0
 
     while sequence.size(1) < target_length:
         speculated_sequence = sequence
@@ -65,8 +37,6 @@ def speculative_sampling(
         draft_logits_history = []
 
         for _ in range(spec_steps):
-            drafted_count += 1
-            
             draft_logits = drafter(speculated_sequence)
             # draft_logits has shape [batch_size, sequence_length, vocabulary_size].
             # To get the next token we need to select only the last position in
@@ -126,8 +96,6 @@ def speculative_sampling(
             else:
                 break
 
-        accepted_count += len(accepted_tokens)
-
         if len(accepted_tokens) < spec_steps:
             next_pos = sequence.size(1) + len(accepted_tokens)
             
@@ -141,8 +109,6 @@ def speculative_sampling(
             # distribution that no longer sums to 1
             adjusted_probs /= sum_adjusted
             next_token = torch.argmax(adjusted_probs, dim=-1, keepdim=True)
-
-            resample_count += 1
         else:
             if sequence.size(1) + spec_steps >= target_length:
                 next_token = None
@@ -155,11 +121,6 @@ def speculative_sampling(
         for t in accepted_tokens:
             sequence = torch.cat([sequence, t.unsqueeze(1)], dim=1)
 
-    print("Accepted count:", accepted_count)
-    print("Drafted count:", drafted_count)
-    print("Resampled count:", resample_count)
-    print("Accepted / drafted ratio:", accepted_count / drafted_count)
-    
     return sequence
 
 
@@ -171,15 +132,22 @@ if __name__ == '__main__':
 
     tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(verifier_id)
 
-    verifier = AutoModelForCausalLM.from_pretrained(verifier_id)
-    verifier = model_fn(verifier)
+    verifier_model: PreTrainedModel = AutoModelForCausalLM.from_pretrained(verifier_id)
+    verifier = model_fn(verifier_model)
 
-    drafter = AutoModelForCausalLM.from_pretrained(drafter_id)
-    drafter = model_fn(drafter)
+    drafter_model = AutoModelForCausalLM.from_pretrained(drafter_id)
+    drafter = model_fn(drafter_model)
 
     input_text = "I'm not convinced"
     input_ids = tokenizer.encode(input_text, return_tensors='pt')
 
-    output = speculative_sampling(input_ids, verifier, drafter, 10)
-    output = tokenizer.decode(output[0])
+    max_new_tokens = 10
+
+    with Benchmark('without speculative decoding'):
+        verifier_model.generate(input_ids, max_new_tokens=max_new_tokens, use_cache=False)
+
+    with Benchmark('with speculative decoding'):
+        output = speculative_sampling(input_ids, verifier, drafter, max_new_tokens)
+
+    output = tokenizer.decode(output[0], skip_special_tokens=True)
     print(output)
